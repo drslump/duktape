@@ -64,6 +64,10 @@ DUK_INTERNAL duk_bool_t duk_js_toboolean(duk_tval *tv) {
 	case DUK_TAG_BOOLEAN:
 		return DUK_TVAL_GET_BOOLEAN(tv);
 	case DUK_TAG_STRING: {
+		/* Symbols ToBoolean() coerce to true, regardless of their
+		 * description.  This happens with no explicit check because
+		 * of the symbol representation byte prefix.
+		 */
 		duk_hstring *h = DUK_TVAL_GET_STRING(tv);
 		DUK_ASSERT(h != NULL);
 		return (DUK_HSTRING_GET_BYTELEN(h) > 0 ? 1 : 0);
@@ -191,7 +195,12 @@ DUK_INTERNAL duk_double_t duk_js_tonumber(duk_hthread *thr, duk_tval *tv) {
 		return 0.0;
 	}
 	case DUK_TAG_STRING: {
+		/* For Symbols ToNumber() is always a TypeError. */
 		duk_hstring *h = DUK_TVAL_GET_STRING(tv);
+		if (DUK_HSTRING_HAS_ES6SYMBOL(h)) {
+			/* FIXME: what about hidden symbols? */
+			DUK_ERROR_TYPE(thr, "cannot number coerce Symbol");  /* FIXME: msg */
+		}
 		duk_push_hstring(ctx, h);
 		return duk__tonumber_string_raw(thr);
 	}
@@ -530,6 +539,8 @@ DUK_INTERNAL duk_bool_t duk_js_equals_helper(duk_hthread *thr, duk_tval *tv_x, d
 	duk_context *ctx = (duk_context *) thr;
 	duk_tval *tv_tmp;
 
+	/* FIXME: symbol support */
+
 	/* If flags != 0 (strict or SameValue), thr can be NULL.  For loose
 	 * equals comparison it must be != NULL.
 	 */
@@ -577,7 +588,10 @@ DUK_INTERNAL duk_bool_t duk_js_equals_helper(duk_hthread *thr, duk_tval *tv_x, d
 		}
 		case DUK_TAG_STRING:
 		case DUK_TAG_OBJECT: {
-			/* heap pointer comparison suffices */
+			/* Heap pointer comparison suffices for strings and objects.
+			 * Symbols compare equal if they have the same internal
+			 * representation; again heap pointer comparison suffices.
+			 */
 			return DUK_TVAL_GET_HEAPHDR(tv_x) == DUK_TVAL_GET_HEAPHDR(tv_y);
 		}
 		case DUK_TAG_BUFFER: {
@@ -634,6 +648,8 @@ DUK_INTERNAL duk_bool_t duk_js_equals_helper(duk_hthread *thr, duk_tval *tv_x, d
 		return 1;
 	}
 
+	/* FIXME: SYMBOLS, macro like DUK_TVAL_IS_STRING_NONSYMBOL? */
+
 	/* Number/string -> coerce string to number (e.g. "'1.5' == 1.5" -> true). */
 	if (DUK_TVAL_IS_NUMBER(tv_x) && DUK_TVAL_IS_STRING(tv_y)) {
 		/* the next 'if' is guaranteed to match after swap */
@@ -683,6 +699,7 @@ DUK_INTERNAL duk_bool_t duk_js_equals_helper(duk_hthread *thr, duk_tval *tv_x, d
 		tv_y = tv_tmp;
 	}
 	if (DUK_TVAL_IS_OBJECT(tv_x) && (DUK_TVAL_IS_STRING(tv_y) || DUK_TVAL_IS_NUMBER(tv_y))) {
+		/* FIXME: test for Symbols */
 		duk_bool_t rc;
 		duk_push_tval(ctx, tv_x);
 		duk_push_tval(ctx, tv_y);
@@ -778,6 +795,8 @@ DUK_INTERNAL duk_small_int_t duk_js_buffer_compare(duk_heap *heap, duk_hbuffer *
 }
 #endif
 
+/* FIXME: SYMBOLS */
+
 DUK_INTERNAL duk_bool_t duk_js_compare_helper(duk_hthread *thr, duk_tval *tv_x, duk_tval *tv_y, duk_small_int_t flags) {
 	duk_context *ctx = (duk_context *) thr;
 	duk_double_t d1, d2;
@@ -853,6 +872,10 @@ DUK_INTERNAL duk_bool_t duk_js_compare_helper(duk_hthread *thr, duk_tval *tv_x, 
 		duk_hstring *h2 = DUK_TVAL_GET_STRING(tv_y);
 		DUK_ASSERT(h1 != NULL);
 		DUK_ASSERT(h2 != NULL);
+
+		/* FIXME: Symbols should not take this path; they should get
+		 * ToNumber() coerced which fails due to TypeError.
+		 */
 
 		rc = duk_js_string_compare(h1, h2);
 		if (rc < 0) {
@@ -1169,6 +1192,8 @@ DUK_INTERNAL duk_bool_t duk_js_in(duk_hthread *thr, duk_tval *tv_x, duk_tval *tv
 	duk_push_tval(ctx, tv_x);
 	duk_push_tval(ctx, tv_y);
 	duk_require_type_mask(ctx, -1, DUK_TYPE_MASK_OBJECT | DUK_TYPE_MASK_LIGHTFUNC | DUK_TYPE_MASK_BUFFER);
+
+	/* FIXME: accept symbol */
 	duk_to_string(ctx, -2);               /* coerce lval with ToString() */
 
 	retval = duk_hobject_hasprop(thr,
@@ -1216,7 +1241,16 @@ DUK_INTERNAL duk_small_uint_t duk_js_typeof_stridx(duk_tval *tv_x) {
 		break;
 	}
 	case DUK_TAG_STRING: {
-		stridx = DUK_STRIDX_LC_STRING;
+		duk_hstring *str;
+
+		/* All internal keys are identified as Symbols. */
+		str = DUK_TVAL_GET_STRING(tv_x);
+		DUK_ASSERT(str != NULL);
+		if (DUK_HSTRING_HAS_INTERNAL(str)) {
+			stridx = DUK_STRIDX_LC_SYMBOL;
+		} else {
+			stridx = DUK_STRIDX_LC_STRING;
+		}
 		break;
 	}
 	case DUK_TAG_OBJECT: {

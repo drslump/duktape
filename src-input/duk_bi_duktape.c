@@ -240,7 +240,7 @@ DUK_INTERNAL duk_ret_t duk_bi_duktape_object_enc(duk_context *ctx) {
 	 * non-existent optional parameters.
 	 */
 
-	h_str = duk_require_hstring(ctx, 0);
+	h_str = duk_require_hstring(ctx, 0);  /* FIXME: could reject symbols, but no point: won't match comparisons */
 	duk_require_valid_index(ctx, 1);
 
 	if (h_str == DUK_HTHREAD_STRING_HEX(thr)) {
@@ -287,7 +287,7 @@ DUK_INTERNAL duk_ret_t duk_bi_duktape_object_dec(duk_context *ctx) {
 	 * non-existent optional parameters.
 	 */
 
-	h_str = duk_require_hstring(ctx, 0);
+	h_str = duk_require_hstring(ctx, 0);  /* FIXME: could reject symbols, but no point: won't match comparisons */
 	duk_require_valid_index(ctx, 1);
 
 	if (h_str == DUK_HTHREAD_STRING_HEX(thr)) {

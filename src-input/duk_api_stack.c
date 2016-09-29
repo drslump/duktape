@@ -1735,6 +1735,9 @@ DUK_EXTERNAL duk_size_t duk_get_length(duk_context *ctx, duk_idx_t idx) {
 	case DUK_TAG_STRING: {
 		duk_hstring *h = DUK_TVAL_GET_STRING(tv);
 		DUK_ASSERT(h != NULL);
+		if (DUK_HSTRING_HAS_ES6SYMBOL(h)) {
+			return 0;  /* FIXME: hidden symbols? */
+		}
 		return (duk_size_t) DUK_HSTRING_GET_CHARLEN(h);
 	}
 	case DUK_TAG_OBJECT: {
@@ -1839,6 +1842,32 @@ DUK_EXTERNAL void duk_to_primitive(duk_context *ctx, duk_idx_t idx, duk_int_t hi
 	DUK_ASSERT(hint == DUK_HINT_NONE || hint == DUK_HINT_NUMBER || hint == DUK_HINT_STRING);
 
 	idx = duk_require_normalize_index(ctx, idx);
+
+	/* XXX: Symbol objects normally coerce via the ES6-revised ToPrimitive()
+	 * algorithm which consults value[@@toPrimitive] and avoids calling
+	 * .valueOf() and .toString().  Before that is implemented, special
+	 * case Symbol objects to behave as if they had the default @@toPrimitive
+	 * algorithm of E6 Section 19.4.3.4, i.e. return the plain symbol value
+	 * with no further side effects.
+	 */
+	/* FIXME: symbol support for Symbol objects (plain symbols already OK).
+	 * Proper implementation for this placeholder.
+	 */
+	{
+		duk_hobject *h;
+		duk_tval tv_val;
+
+		h = duk_get_hobject(ctx, idx);
+		if (h && DUK_HOBJECT_GET_CLASS_NUMBER(h) == DUK_HOBJECT_CLASS_SYMBOL) {
+			if (duk_hobject_get_internal_value(thr->heap, h, &tv_val)) {
+				if (DUK_TVAL_IS_STRING(&tv_val)) {
+					duk_push_tval(ctx, &tv_val);
+					duk_replace(ctx, idx);
+					return;
+				}
+			}
+		}
+	}
 
 	if (!duk_check_type_mask(ctx, idx, DUK_TYPE_MASK_OBJECT |
 	                                   DUK_TYPE_MASK_LIGHTFUNC |
@@ -2097,6 +2126,7 @@ DUK_EXTERNAL const char *duk_safe_to_lstring(duk_context *ctx, duk_idx_t idx, du
 			;
 		}
 	} else {
+		/* FIXME: now accepts symbols, this seems OK */
 		;
 	}
 	DUK_ASSERT(duk_is_string(ctx, -1));
@@ -2148,7 +2178,14 @@ DUK_INTERNAL void duk_push_class_string_tval(duk_context *ctx, duk_tval *tv) {
 		break;
 	}
 	case DUK_TAG_STRING: {
-		stridx = DUK_STRIDX_UC_STRING;
+		duk_hstring *h;
+		h = DUK_TVAL_GET_STRING(tv);
+		DUK_ASSERT(h != NULL);
+		if (DUK_HSTRING_HAS_ES6SYMBOL(h)) {
+			stridx = DUK_STRIDX_UC_SYMBOL;
+		} else {
+			stridx = DUK_STRIDX_UC_STRING;
+		}
 		break;
 	}
 	case DUK_TAG_OBJECT: {
@@ -2159,6 +2196,16 @@ DUK_INTERNAL void duk_push_class_string_tval(duk_context *ctx, duk_tval *tv) {
 		DUK_ASSERT(h != NULL);
 		classnum = DUK_HOBJECT_GET_CLASS_NUMBER(h);
 		stridx = DUK_HOBJECT_CLASS_NUMBER_TO_STRIDX(classnum);
+
+		/* XXX: This is not entirely correct anymore; in ES6 the
+		 * default lookup should use @@toStringTag to come up with
+		 * e.g. [object Symbol], [object Uint8Array], etc.  See
+		 * ES6 Section 19.1.3.6.  The downside of implementing that
+		 * directly is that the @@toStringTag lookup may have side
+		 * effects, so all call sites must be checked for that.
+		 * Some may need a side-effect free lookup, e.g. avoiding
+		 * getters which are not typical.
+		 */
 		break;
 	}
 	case DUK_TAG_BUFFER: {
@@ -2283,14 +2330,30 @@ DUK_EXTERNAL const char *duk_to_string(duk_context *ctx, duk_idx_t idx) {
 		break;
 	}
 	case DUK_TAG_STRING: {
-		/* nop */
+		/* Nop for actual strings, TypeError for Symbols.
+		 * Because various internals rely on ToString() coercion of
+		 * internal strings, -allow- (NOP) string coercion for hidden
+		 * symbols.
+		 */
+#if 1
+		duk_hstring *h;
+		h = DUK_TVAL_GET_STRING(tv);
+		DUK_ASSERT(h != NULL);
+		if (DUK_HSTRING_HAS_ES6SYMBOL(h)) {
+			DUK_ERROR_TYPE((duk_hthread *) ctx, "cannot string coerce Symbol");  /* FIXME: better msg */
+		} else {
+			goto skip_replace;
+		}
+#else
 		goto skip_replace;
+#endif
 	}
 	case DUK_TAG_BUFFER: /* Go through ArrayBuffer.prototype.toString() for coercion. */
 	case DUK_TAG_OBJECT: {
 		duk_to_primitive(ctx, idx, DUK_HINT_STRING);
 		DUK_ASSERT(!duk_is_buffer(ctx, idx));  /* ToPrimitive() must guarantee */
 		DUK_ASSERT(!duk_is_object(ctx, idx));
+		/* FIXME: must reject Symbols */
 		return duk_to_string(ctx, idx);  /* Note: recursive call */
 	}
 	case DUK_TAG_POINTER: {
@@ -2406,6 +2469,7 @@ DUK_EXTERNAL void *duk_to_buffer_raw(duk_context *ctx, duk_idx_t idx, duk_size_t
 		 * explicitly requested).
 		 */
 
+		/* FIXME: for symbols this means a TypeError now, maybe C API should allow? */
 		src_data = (const duk_uint8_t *) duk_to_lstring(ctx, idx, &src_size);
 	}
 
@@ -2544,10 +2608,20 @@ DUK_EXTERNAL void duk_to_object(duk_context *ctx, duk_idx_t idx) {
 		goto create_object;
 	}
 	case DUK_TAG_STRING: {
-		flags = DUK_HOBJECT_FLAG_EXTENSIBLE |
-		        DUK_HOBJECT_FLAG_EXOTIC_STRINGOBJ |
-		        DUK_HOBJECT_CLASS_AS_FLAGS(DUK_HOBJECT_CLASS_STRING);
-		proto = DUK_BIDX_STRING_PROTOTYPE;
+		duk_hstring *h;
+		h = DUK_TVAL_GET_STRING(tv);
+		DUK_ASSERT(h != NULL);
+		if (DUK_HSTRING_HAS_ES6SYMBOL(h)) {
+			/* FIXME: what about hidden symbols? */
+			flags = DUK_HOBJECT_FLAG_EXTENSIBLE |
+			        DUK_HOBJECT_CLASS_AS_FLAGS(DUK_HOBJECT_CLASS_SYMBOL);
+			proto = DUK_BIDX_SYMBOL_PROTOTYPE;
+		} else {
+			flags = DUK_HOBJECT_FLAG_EXTENSIBLE |
+			        DUK_HOBJECT_FLAG_EXOTIC_STRINGOBJ |
+			        DUK_HOBJECT_CLASS_AS_FLAGS(DUK_HOBJECT_CLASS_STRING);
+			proto = DUK_BIDX_STRING_PROTOTYPE;
+		}
 		goto create_object;
 	}
 	case DUK_TAG_OBJECT: {
@@ -3335,8 +3409,8 @@ DUK_INTERNAL duk_hstring *duk_push_this_coercible_to_string(duk_context *ctx) {
 	DUK_ASSERT_CTX_VALID(ctx);
 
 	duk__push_this_helper(ctx, 1 /*check_object_coercible*/);
-	duk_to_string(ctx, -1);
-	h = duk_get_hstring(ctx, -1);
+	h = duk_to_hstring(ctx, -1);  /* This will reject all Symbol values. */
+	/* FIXME: but symbol Objects are accepted now */
 	DUK_ASSERT(h != NULL);
 	return h;
 }
@@ -4770,6 +4844,7 @@ DUK_LOCAL const char *duk__push_string_tval_readable(duk_context *ctx, duk_tval 
 	} else {
 		switch (DUK_TVAL_GET_TAG(tv)) {
 		case DUK_TAG_STRING: {
+			/* FIXME: symbol support (maybe in summary rework branch) */
 			duk__push_hstring_readable_unicode(ctx, DUK_TVAL_GET_STRING(tv));
 			break;
 		}
@@ -4842,4 +4917,26 @@ DUK_INTERNAL const char *duk_push_string_readable(duk_context *ctx, duk_idx_t id
 DUK_INTERNAL const char *duk_push_string_tval_readable_error(duk_context *ctx, duk_tval *tv) {
 	DUK_ASSERT_CTX_VALID(ctx);
 	return duk__push_string_tval_readable(ctx, tv, 1 /*error_aware*/);
+}
+
+DUK_INTERNAL void duk_push_symbol_descriptive_string(duk_context *ctx, duk_hstring *h) {
+	const duk_uint8_t *p;
+	const duk_uint8_t *q;
+
+	/* .toString() */
+	duk_push_string(ctx, "Symbol(");
+	p = (const duk_uint8_t *) DUK_HSTRING_GET_DATA(h);
+	DUK_ASSERT(p[0] == 0xff || (p[0] & 0xc0) == 0x80);
+	p++;
+	for (q = p; ; q++) {
+		if (*q == 0xffU || *q == 0x00U) {
+			/* Terminate either at NUL or 0xFF; 0xFF is
+			 * used to mark start of unique trailer.
+			 */
+			break;
+		}
+	}
+	duk_push_lstring(ctx, (const char *) p, (duk_size_t) (q - p));
+	duk_push_string(ctx, ")");
+	duk_concat(ctx, 3);
 }
