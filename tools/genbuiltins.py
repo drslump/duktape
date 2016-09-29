@@ -273,6 +273,33 @@ def metadata_merge_user_objects(meta, user_meta):
                     logger.debug('Add property %s of %s' % (p['key'], o['id']))
                     targ['properties'].append(p)
 
+# Replace 'symbol' keys and values with encoded strings.
+def format_symbol(sym):
+    print(repr(sym))
+    assert(isinstance(sym, dict))
+    assert(sym.get('type', None) == 'symbol')
+    variant = sym['variant']
+    if variant == 'global':
+        return '\x80' + sym['string']
+    elif variant == 'hidden':
+        return '\xff' + sym['string']
+    raise Exception('invalid symbol variant %r' % variant)
+
+def metadata_normalize_symbol_strings(meta):
+    for o in meta['strings']:
+        if isinstance(o['str'], dict) and o['str'].get('type') == 'symbol':
+            o['str'] = format_symbol(o['str'])
+            print('normalized symbol as string list element: %r', o)
+
+    for o in meta['objects']:
+        for p in o['properties']:
+            if isinstance(p['key'], dict) and p['key'].get('type') == 'symbol':
+                p['key'] = format_symbol(p['key'])
+                print('normalized symbol as property key: %r', p)
+            if isinstance(p['value'], dict) and p['value'].get('type') == 'symbol':
+                p['value'] = format_symbol(p['value'])
+                print('normalized symbol as property value: %r', p)
+
 # Normalize nargs for top level functions by defaulting 'nargs' from 'length'.
 def metadata_normalize_nargs_length(meta):
     # Default 'nargs' from 'length' for top level function objects.
@@ -964,6 +991,9 @@ def load_metadata(opts, rom=False, build_info=None):
 
     # Remove disabled objects and properties.
     metadata_remove_disabled(meta)
+
+    # Replace Symbol keys and property values with plain (encoded) strings.
+    metadata_normalize_symbol_strings(meta)
 
     # Normalize 'nargs' and 'length' defaults.
     metadata_normalize_nargs_length(meta)
@@ -1804,6 +1834,8 @@ def gen_ramobj_initdata_for_props(meta, be, bi, string_to_stridx, natfunc_name_t
             else:
                 # Not in string table -> encode as raw 7-bit value
 
+		# FIXME: doesn't now work for Symbols / internal properties
+		# because limited to 7 bits.
                 be.bits(PROP_TYPE_STRING, PROP_TYPE_BITS)
                 be.bits(len(val), STRING_LENGTH_BITS)
                 for i in xrange(len(val)):
